@@ -1,0 +1,8 @@
+bin/
+obj/
+.vs/
+*.exe
+*.so
+*.dll
+*.log
+.env
