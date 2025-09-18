@@ -6,3 +6,5 @@ obj/
 *.dll
 *.log
 .env
+/src/DopModules/CppDocker/.vs
+/src/DopModules/CppDocker/out
