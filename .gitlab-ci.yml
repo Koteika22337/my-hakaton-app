@@ -1,0 +1,27 @@
+stages:
+  - test
+  - deploy
+
+variables:
+  SERVER_IP: "84.252.74.196"
+  SERVER_USER: "sanya"
+
+before_script:
+  - apt-get update -y && apt-get install -y openssh-client
+  - mkdir -p ~/.ssh
+  - echo "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_rsa
+  - chmod 600 ~/.ssh/id_rsa
+  - ssh-keyscan -H $SERVER_IP >> ~/.ssh/known_hosts
+
+test:
+  stage: test
+  script:
+    - cd src/Backend
+    - dotnet test
+
+deploy:
+  stage: deploy
+  script:
+    - ssh $SERVER_USER@$SERVER_IP "cd ~/hakaton && git pull && docker-compose down && docker-compose up --build -d"
+  only:
+    - main
