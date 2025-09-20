@@ -1,6 +1,5 @@
-import Head from "next/head";
-
-import "../public/styles/global.scss";
+import Head from 'next/head';
+import '../public/styles/global.scss';
 
 export default function App({ Component, pageProps }) {
   return (
