@@ -19,3 +19,6 @@ docker-compose up --build
 - `GET /api/servers/{id}/logs` — получение логов хоста.
 - `GET /api/servers/{id}/stats` — получение статистики хоста.
 - `GET /api/stats/overview` — получение общей статистики для дашборда.
+
+## Презентация
+https://gamma.app/docs/Dooka-aed4eh57k098vgt
