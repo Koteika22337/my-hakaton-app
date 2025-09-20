@@ -8,3 +8,6 @@ obj/
 .env
 /src/DopModules/CppDocker/.vs
 /src/DopModules/CppDocker/out
+
+node_modules/
+.next/

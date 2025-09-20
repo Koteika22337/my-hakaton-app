@@ -1,5 +1,6 @@
 import Head from "next/head";
 import { getServerByName } from "../public/scripts/getServerByName";
+import Link from "next/link";
 
 export async function getServerSideProps({ params }) {
   const data = await getServerByName(params.slug);
@@ -60,12 +61,12 @@ export default function ServerInfo({ data }) {
           </div>
         </div>
 
-        <button
-          onClick={() => router.back()}
+        <Link
+          href="/"
           className="mt-6 px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded"
         >
           Назад к списку
-        </button>
+        </Link>
       </div>
     </>
   );
