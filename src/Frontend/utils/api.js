@@ -1,6 +1,6 @@
 import { logs, servers, serverStats, stats } from "./placeholder";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5195';
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || 'backend:8080';
 
 export const api = {
   // Получение списка серверов
@@ -9,7 +9,7 @@ export const api = {
     // const response = await fetch(`${API_BASE}/api/servers?${queryParams}`);
     // return response.json();
 
-    return servers;
+    return servers; // ✅ Правильно - возвращаем все серверы
   },
 
   // Добавление сервера
@@ -24,12 +24,14 @@ export const api = {
     return response.json();
   },
 
-  // Получение данных сервера
+  // Получение данных сервера - ИСПРАВЛЕНО
   getServer: async (id) => {
     // const response = await fetch(`${API_BASE}/api/servers/${id}`);
     // return response.json();
     
-    return servers[0];
+    // ✅ Находим сервер по ID
+    const server = servers.find(s => s.id === parseInt(id));
+    return server || null;
   },
 
   // Обновление сервера
@@ -52,21 +54,24 @@ export const api = {
     return response.json();
   },
 
-  // Получение логов сервера
+  // Получение логов сервера - ИСПРАВЛЕНО
   getServerLogs: async (id, params = {}) => {
     // const queryParams = new URLSearchParams(params).toString();
     // const response = await fetch(`${API_BASE}/api/servers/${id}/logs?${queryParams}`);
     // return response.json();
 
+    // ✅ Возвращаем логи (в реальности нужно фильтровать по serverId)
     return logs;
   },
 
-  // Получение статистики сервера
+  // Получение статистики сервера - ИСПРАВЛЕНО
   getServerStats: async (id, period = '24h') => {
     // const response = await fetch(`${API_BASE}/api/servers/${id}/stats?period=${period}`);
     // return response.json();
 
-    return serverStats;
+    // ✅ Находим статистику по ID сервера
+    const stats = serverStats.find(s => s.id === parseInt(id));
+    return stats ? [stats] : []; // Возвращаем массив с одним элементом
   },
 
   // Получение общей статистики

@@ -1,5 +1,15 @@
 @use "tailwindcss";
 
+:root {
+  --color-primary: #3B82F6;
+  --color-success: #10B981;
+  --color-warning: #F59E0B;
+  --color-error: #EF4444;
+  --color-background: rgba(255, 255, 255, 0.05);
+  --color-border: rgba(255, 255, 255, 0.1);
+  --color-text: #F3F4F6;
+}
+
 * {
   &::-webkit-scrollbar {
     cursor: pointer;
