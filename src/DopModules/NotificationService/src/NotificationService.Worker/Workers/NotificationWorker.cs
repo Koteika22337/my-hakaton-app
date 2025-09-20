@@ -5,7 +5,7 @@ using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 using NotificationService.Contracts.Messages;
 using NotificationService.Worker.Models;
-using NotificationService.EmailService.Models;
+using NotificationService.EmailService.Services;
 
 namespace NotificationService.Worker.Workers;
 
@@ -13,169 +13,312 @@ public class NotificationWorker : BackgroundService
 {
     private readonly ILogger<NotificationWorker> _logger;
     private readonly RabbitMqSettings _rabbitMqSettings;
-    private readonly SmtpSettings _smtpSettings;
+    private readonly IEmailService _emailService;
     private IConnection? _connection;
     private IModel? _channel;
+    private readonly JsonSerializerOptions _jsonOptions;
 
     public NotificationWorker(
         ILogger<NotificationWorker> logger,
         IOptions<RabbitMqSettings> rabbitMqSettings,
-        IOptions<SmtpSettings> smtpSettings)
+        IEmailService emailService)
     {
         _logger = logger;
-        _rabbitMqSettings = rabbitMqSettings.Value;
-        _smtpSettings = smtpSettings.Value;
+        _rabbitMqSettings = rabbitMqSettings?.Value ?? throw new ArgumentNullException(nameof(rabbitMqSettings));
+        _emailService = emailService ?? throw new ArgumentNullException(nameof(emailService));
+
+        // Настройки JSON
+        _jsonOptions = new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true,
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        };
     }
 
-    public override async Task StartAsync(CancellationToken cancellationToken)
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Starting Notification Worker...");
 
-        // Пытаемся подключиться к RabbitMQ с retry
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                if (!await InitializeRabbitMQ(stoppingToken))
+                {
+                    _logger.LogError("Failed to initialize RabbitMQ connection. Retrying in 10 seconds...");
+                    await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+                    continue;
+                }
+
+                await ProcessMessagesAsync(stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                _logger.LogInformation("Worker cancellation requested");
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Unexpected error in worker execution. Restarting in 10 seconds...");
+                await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+            }
+        }
+
+        _logger.LogInformation("Notification Worker stopped");
+    }
+
+    private async Task<bool> InitializeRabbitMQ(CancellationToken cancellationToken)
+    {
+        int maxRetries = 10;
         int retryCount = 0;
-        int maxRetries = 5;
-        int delayMs = 2000; // 2 секунды между попытками
 
         while (retryCount < maxRetries && !cancellationToken.IsCancellationRequested)
         {
             try
             {
+                // Очищаем предыдущие соединения
+                CleanupResources();
+
                 var factory = new ConnectionFactory
                 {
-                    HostName = "rabbitmq",  // ← ИМЯ СЕРВИСА В docker-compose.yml
+                    HostName = _rabbitMqSettings.HostName,
                     Port = _rabbitMqSettings.Port,
                     UserName = _rabbitMqSettings.UserName,
-                    Password = _rabbitMqSettings.Password
+                    Password = _rabbitMqSettings.Password,
+                    DispatchConsumersAsync = true,
+                    AutomaticRecoveryEnabled = true,
+                    NetworkRecoveryInterval = TimeSpan.FromSeconds(10)
                 };
 
                 _connection = factory.CreateConnection();
+                _connection.ConnectionShutdown += OnConnectionShutdown;
+                
                 _channel = _connection.CreateModel();
+                _channel.ModelShutdown += OnModelShutdown;
 
-                // Declare exchange and queue
+                // Объявляем exchange и queue
                 _channel.ExchangeDeclare(
                     exchange: _rabbitMqSettings.ExchangeName,
                     type: ExchangeType.Direct,
-                    durable: true);
+                    durable: true,
+                    autoDelete: false);
 
                 _channel.QueueDeclare(
                     queue: _rabbitMqSettings.QueueName,
                     durable: true,
                     exclusive: false,
-                    autoDelete: false);
+                    autoDelete: false,
+                    arguments: null);
 
                 _channel.QueueBind(
                     queue: _rabbitMqSettings.QueueName,
                     exchange: _rabbitMqSettings.ExchangeName,
                     routingKey: _rabbitMqSettings.RoutingKey);
 
-                _logger.LogInformation("RabbitMQ connection established");
-                _logger.LogInformation("Listening on queue: {QueueName}", _rabbitMqSettings.QueueName);
-                break; // Успешно подключились — выходим из цикла
+                // Настройка QoS
+                _channel.BasicQos(prefetchSize: 0, prefetchCount: 1, global: false);
+
+                _logger.LogInformation("✅ RabbitMQ connection established");
+                return true;
             }
             catch (Exception ex)
             {
                 retryCount++;
-                _logger.LogWarning(ex, "Failed to connect to RabbitMQ. Attempt {RetryCount}/{MaxRetries}. Waiting {DelayMs}ms...", retryCount, maxRetries, delayMs);
-                if (retryCount < maxRetries)
+                _logger.LogWarning(ex, "Failed to connect to RabbitMQ. Attempt {RetryCount}/{MaxRetries}", retryCount, maxRetries);
+                
+                if (retryCount < maxRetries && !cancellationToken.IsCancellationRequested)
                 {
-                    await Task.Delay(delayMs, cancellationToken);
+                    // Exponential backoff
+                    var delay = TimeSpan.FromMilliseconds(3000 * Math.Pow(2, retryCount - 1));
+                    await Task.Delay(delay, cancellationToken);
                 }
             }
         }
 
-        if (_connection == null || _channel == null)
-        {
-            throw new InvalidOperationException($"Could not connect to RabbitMQ after {maxRetries} attempts.");
-        }
-
-        await base.StartAsync(cancellationToken);
+        _logger.LogError("❌ Could not connect to RabbitMQ after {MaxRetries} attempts", maxRetries);
+        return false;
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    private async Task ProcessMessagesAsync(CancellationToken stoppingToken)
     {
-        if (_channel == null)
+        if (_channel == null || !_channel.IsOpen)
         {
-            _logger.LogError("RabbitMQ channel is not initialized");
-            return;
+            throw new InvalidOperationException("RabbitMQ channel is not available");
         }
 
-        var consumer = new EventingBasicConsumer(_channel);
-
+        var consumer = new AsyncEventingBasicConsumer(_channel);
+        
         consumer.Received += async (model, ea) =>
         {
-            var body = ea.Body.ToArray();
-            var message = Encoding.UTF8.GetString(body);
-
             try
             {
-                _logger.LogDebug("Received message: {Message}", message);
-
-                var notification = JsonSerializer.Deserialize<NotificationMessage>(message);
-
-                if (notification != null)
-                {
-                    _logger.LogInformation("Processing notification for email: {Email}", notification.Email);
-
-                    // Создаем экземпляр EmailService и отправляем email
-                    var emailService = new EmailService.Services.EmailService(_smtpSettings);
-                    await emailService.SendStatusReportAsync(notification.Email, notification.Report);
-
-                    _logger.LogInformation("Email sent successfully to: {Email}", notification.Email);
-
-                    // Подтверждаем обработку сообщения
-                    _channel.BasicAck(ea.DeliveryTag, false);
-                }
-                else
-                {
-                    _logger.LogWarning("Failed to deserialize notification message");
-                    _channel.BasicReject(ea.DeliveryTag, false);
-                }
+                await ProcessMessageAsync(ea, stoppingToken);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error processing message: {Message}", message);
-                // Отклоняем сообщение без повторной обработки
-                try
-                {
-                    _channel.BasicReject(ea.DeliveryTag, false);
-                }
-                catch (Exception rejectEx)
-                {
-                    _logger.LogError(rejectEx, "Failed to reject message");
-                }
+                _logger.LogError(ex, "Error in message processing");
+                TryRejectMessage(ea, requeue: false);
             }
         };
 
-        // Начинаем слушать очередь
+        consumer.Shutdown += (model, ea) =>
+        {
+            _logger.LogWarning("Consumer shutdown: {Cause}", ea.Cause);
+            return Task.CompletedTask;
+        };
+
         _channel.BasicConsume(
             queue: _rabbitMqSettings.QueueName,
-            autoAck: false, // Ручное подтверждение
+            autoAck: false,
             consumer: consumer);
 
-        _logger.LogInformation("Worker started listening for messages...");
+        _logger.LogInformation("Worker started listening for messages on queue: {QueueName}", _rabbitMqSettings.QueueName);
 
-        // Бесконечный цикл ожидания
-        while (!stoppingToken.IsCancellationRequested)
+        // Ждем отмены или потери соединения
+        var connectionLostSource = new TaskCompletionSource<bool>();
+        
+        void OnConnectionLost(object? sender, ShutdownEventArgs e)
         {
-            await Task.Delay(1000, stoppingToken);
+            _logger.LogWarning("Connection lost: {Cause}", e.Cause);
+            connectionLostSource.TrySetResult(true);
+        }
+
+        if (_connection != null)
+        {
+            _connection.ConnectionShutdown += OnConnectionLost;
+        }
+        
+        if (_channel != null)
+        {
+            _channel.ModelShutdown += OnConnectionLost;
+        }
+
+        try
+        {
+            await Task.WhenAny(
+                Task.Delay(Timeout.Infinite, stoppingToken),
+                connectionLostSource.Task);
+        }
+        finally
+        {
+            if (_connection != null)
+            {
+                _connection.ConnectionShutdown -= OnConnectionLost;
+            }
+            
+            if (_channel != null)
+            {
+                _channel.ModelShutdown -= OnConnectionLost;
+            }
+            
+            // Вручную освобождаем ресурсы TaskCompletionSource
+            connectionLostSource.TrySetCanceled();
+        }
+    }
+
+    private async Task ProcessMessageAsync(BasicDeliverEventArgs ea, CancellationToken cancellationToken)
+    {
+        if (_channel == null || !_channel.IsOpen)
+        {
+            _logger.LogError("RabbitMQ channel is not available for message processing");
+            return;
+        }
+
+        try
+        {
+            var body = ea.Body.ToArray();
+            var message = Encoding.UTF8.GetString(body);
+            
+            _logger.LogDebug("Received message: {Message}", message);
+
+            var notification = JsonSerializer.Deserialize<NotificationMessage>(message, _jsonOptions);
+            if (notification == null)
+            {
+                _logger.LogWarning("Failed to deserialize message. Rejecting without requeue");
+                TryRejectMessage(ea, requeue: false);
+                return;
+            }
+
+            await _emailService.SendStatusReportAsync(notification.Email, notification.Report, cancellationToken);
+            _logger.LogInformation("✅ Email sent to: {Email}", notification.Email);
+            
+            _channel.BasicAck(ea.DeliveryTag, multiple: false);
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning("Email sending cancelled. Requeuing message");
+            TryRejectMessage(ea, requeue: true);
+        }
+        catch (JsonException jsonEx)
+        {
+            _logger.LogError(jsonEx, "JSON deserialization error. Rejecting message without requeue");
+            TryRejectMessage(ea, requeue: false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to process message. Requeuing");
+            TryRejectMessage(ea, requeue: true);
+        }
+    }
+
+    private void TryRejectMessage(BasicDeliverEventArgs ea, bool requeue)
+    {
+        try
+        {
+            if (_channel?.IsOpen == true)
+            {
+                _channel.BasicReject(ea.DeliveryTag, requeue: requeue);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to reject message");
+        }
+    }
+
+    private void OnConnectionShutdown(object? sender, ShutdownEventArgs ea)
+    {
+        _logger.LogWarning("RabbitMQ connection shutdown: {Cause}", ea.Cause);
+    }
+
+    private void OnModelShutdown(object? sender, ShutdownEventArgs ea)
+    {
+        _logger.LogWarning("RabbitMQ channel shutdown: {Cause}", ea.Cause);
+    }
+
+    private void CleanupResources()
+    {
+        try
+        {
+            if (_channel != null)
+            {
+                _channel.ModelShutdown -= OnModelShutdown;
+                _channel.Close();
+                _channel.Dispose();
+                _channel = null;
+            }
+
+            if (_connection != null)
+            {
+                _connection.ConnectionShutdown -= OnConnectionShutdown;
+                _connection.Close();
+                _connection.Dispose();
+                _connection = null;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Error while cleaning up RabbitMQ resources");
         }
     }
 
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
-        _logger.LogInformation("Stopping Notification Worker...");
-
-        try
-        {
-            _channel?.Close();
-            _connection?.Close();
-            _logger.LogInformation("RabbitMQ connection closed");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Error while closing RabbitMQ connection");
-        }
-
+        _logger.LogInformation("Stopping worker...");
+        
+        CleanupResources();
+        
         await base.StopAsync(cancellationToken);
+        _logger.LogInformation("Worker stopped successfully");
     }
 }

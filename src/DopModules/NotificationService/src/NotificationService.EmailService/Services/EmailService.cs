@@ -27,7 +27,11 @@ public class EmailService : IEmailService, IDisposable
         _smtpClient = smtpClient;
     }
 
-    public async Task SendStatusReportAsync(string email, ServerStatusReport report)
+    public async Task SendStatusReportAsync(
+        string email,
+        ServerStatusReport report,
+        CancellationToken ct = default
+    )
     {
         var subject = "📊 Отчет о статусе серверов";
         var body = GenerateEmailBody(report);
