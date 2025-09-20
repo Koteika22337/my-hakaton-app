@@ -14,8 +14,8 @@ public class NotificationWorker : BackgroundService
     private readonly ILogger<NotificationWorker> _logger;
     private readonly RabbitMqSettings _rabbitMqSettings;
     private readonly SmtpSettings _smtpSettings;
-    private IConnection _connection;
-    private IModel _channel;
+    private IConnection? _connection;
+    private IModel? _channel;
 
     public NotificationWorker(
         ILogger<NotificationWorker> logger,
@@ -27,69 +27,101 @@ public class NotificationWorker : BackgroundService
         _smtpSettings = smtpSettings.Value;
     }
 
-    public override Task StartAsync(CancellationToken cancellationToken)
+    public override async Task StartAsync(CancellationToken cancellationToken)
     {
         _logger.LogInformation("Starting Notification Worker...");
-        
-        var factory = new ConnectionFactory
+
+        // Пытаемся подключиться к RabbitMQ с retry
+        int retryCount = 0;
+        int maxRetries = 5;
+        int delayMs = 2000; // 2 секунды между попытками
+
+        while (retryCount < maxRetries && !cancellationToken.IsCancellationRequested)
         {
-            HostName = _rabbitMqSettings.HostName,
-            Port = _rabbitMqSettings.Port,
-            UserName = _rabbitMqSettings.UserName,
-            Password = _rabbitMqSettings.Password
-        };
+            try
+            {
+                var factory = new ConnectionFactory
+                {
+                    HostName = "rabbitmq",  // ← ИМЯ СЕРВИСА В docker-compose.yml
+                    Port = _rabbitMqSettings.Port,
+                    UserName = _rabbitMqSettings.UserName,
+                    Password = _rabbitMqSettings.Password
+                };
 
-        _connection = factory.CreateConnection();
-        _channel = _connection.CreateModel();
+                _connection = factory.CreateConnection();
+                _channel = _connection.CreateModel();
 
-        // Declare exchange and queue
-        _channel.ExchangeDeclare(
-            exchange: _rabbitMqSettings.ExchangeName,
-            type: ExchangeType.Direct,
-            durable: true);
+                // Declare exchange and queue
+                _channel.ExchangeDeclare(
+                    exchange: _rabbitMqSettings.ExchangeName,
+                    type: ExchangeType.Direct,
+                    durable: true);
 
-        _channel.QueueDeclare(
-            queue: _rabbitMqSettings.QueueName,
-            durable: true,
-            exclusive: false,
-            autoDelete: false);
+                _channel.QueueDeclare(
+                    queue: _rabbitMqSettings.QueueName,
+                    durable: true,
+                    exclusive: false,
+                    autoDelete: false);
 
-        _channel.QueueBind(
-            queue: _rabbitMqSettings.QueueName,
-            exchange: _rabbitMqSettings.ExchangeName,
-            routingKey: _rabbitMqSettings.RoutingKey);
+                _channel.QueueBind(
+                    queue: _rabbitMqSettings.QueueName,
+                    exchange: _rabbitMqSettings.ExchangeName,
+                    routingKey: _rabbitMqSettings.RoutingKey);
 
-        _logger.LogInformation("RabbitMQ connection established");
-        _logger.LogInformation("Listening on queue: {QueueName}", _rabbitMqSettings.QueueName);
+                _logger.LogInformation("RabbitMQ connection established");
+                _logger.LogInformation("Listening on queue: {QueueName}", _rabbitMqSettings.QueueName);
+                break; // Успешно подключились — выходим из цикла
+            }
+            catch (Exception ex)
+            {
+                retryCount++;
+                _logger.LogWarning(ex, "Failed to connect to RabbitMQ. Attempt {RetryCount}/{MaxRetries}. Waiting {DelayMs}ms...", retryCount, maxRetries, delayMs);
+                if (retryCount < maxRetries)
+                {
+                    await Task.Delay(delayMs, cancellationToken);
+                }
+            }
+        }
 
-        return base.StartAsync(cancellationToken);
+        if (_connection == null || _channel == null)
+        {
+            throw new InvalidOperationException($"Could not connect to RabbitMQ after {maxRetries} attempts.");
+        }
+
+        await base.StartAsync(cancellationToken);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        if (_channel == null)
+        {
+            _logger.LogError("RabbitMQ channel is not initialized");
+            return;
+        }
+
         var consumer = new EventingBasicConsumer(_channel);
-        
+
         consumer.Received += async (model, ea) =>
         {
             var body = ea.Body.ToArray();
             var message = Encoding.UTF8.GetString(body);
-            
+
             try
             {
                 _logger.LogDebug("Received message: {Message}", message);
-                
+
                 var notification = JsonSerializer.Deserialize<NotificationMessage>(message);
-                
+
                 if (notification != null)
                 {
                     _logger.LogInformation("Processing notification for email: {Email}", notification.Email);
-                    
+
                     // Создаем экземпляр EmailService и отправляем email
                     var emailService = new EmailService.Services.EmailService(_smtpSettings);
                     await emailService.SendStatusReportAsync(notification.Email, notification.Report);
-                    
+
                     _logger.LogInformation("Email sent successfully to: {Email}", notification.Email);
-                    
+
                     // Подтверждаем обработку сообщения
                     _channel.BasicAck(ea.DeliveryTag, false);
                 }
@@ -103,7 +135,14 @@ public class NotificationWorker : BackgroundService
             {
                 _logger.LogError(ex, "Error processing message: {Message}", message);
                 // Отклоняем сообщение без повторной обработки
-                _channel.BasicReject(ea.DeliveryTag, false);
+                try
+                {
+                    _channel.BasicReject(ea.DeliveryTag, false);
+                }
+                catch (Exception rejectEx)
+                {
+                    _logger.LogError(rejectEx, "Failed to reject message");
+                }
             }
         };
 
@@ -125,12 +164,18 @@ public class NotificationWorker : BackgroundService
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
         _logger.LogInformation("Stopping Notification Worker...");
-        
-        _channel?.Close();
-        _connection?.Close();
-        
-        _logger.LogInformation("RabbitMQ connection closed");
-        
+
+        try
+        {
+            _channel?.Close();
+            _connection?.Close();
+            _logger.LogInformation("RabbitMQ connection closed");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Error while closing RabbitMQ connection");
+        }
+
         await base.StopAsync(cancellationToken);
     }
 }

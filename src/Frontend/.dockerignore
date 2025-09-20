@@ -1,4 +1,12 @@
+node_modules
+.next
+.git
+dist
+.cache
+.env
+.env.local
+.env.*.local
+.gitignore
 .eslintrc.json
 .prettierignore
 .prettierrc.json
-.gitignore

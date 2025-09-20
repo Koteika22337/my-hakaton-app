@@ -1,23 +1,22 @@
-# NotificationService.Worker/Dockerfile
 FROM mcr.microsoft.com/dotnet/runtime:9.0 AS base
 WORKDIR /app
 
 FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
 WORKDIR /src
 
-# Копируем все проекты
-COPY ["src/NotificationService.Contracts/NotificationService.Contracts.csproj", "NotificationService.Contracts/"]
-COPY ["src/NotificationService.EmailService/NotificationService.EmailService.csproj", "NotificationService.EmailService/"]
-COPY ["src/NotificationService.Worker/NotificationService.Worker.csproj", "NotificationService.Worker/"]
+# Копируем .csproj файлы — теперь с правильными путями
+COPY ["src/DopModules/NotificationService/src/NotificationService.Contracts/NotificationService.Contracts.csproj", "src/NotificationService.Contracts/"]
+COPY ["src/DopModules/NotificationService/src/NotificationService.EmailService/NotificationService.EmailService.csproj", "src/NotificationService.EmailService/"]
+COPY ["src/DopModules/NotificationService/src/NotificationService.Worker/NotificationService.Worker.csproj", "src/NotificationService.Worker/"]
 
 # Восстанавливаем зависимости
 RUN dotnet restore "src/NotificationService.Worker/NotificationService.Worker.csproj"
 
-# Копируем весь исходный код
+# Копируем весь код
 COPY . .
 
 # Собираем проект
-WORKDIR "/src/NotificationService.Worker"
+WORKDIR "/src/src/DopModules/NotificationService/src/NotificationService.Worker"
 RUN dotnet build "NotificationService.Worker.csproj" -c Release -o /app/build
 
 FROM build AS publish

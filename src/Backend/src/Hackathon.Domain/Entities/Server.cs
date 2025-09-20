@@ -10,7 +10,11 @@ public class Server : BaseEntity
     {
         Name = name;
         if (string.IsNullOrWhiteSpace(port))
-            throw 
-    }
+            throw new ArgumentException("Port cannot be null or empty", nameof(port));
+        if (string.IsNullOrWhiteSpace(host))
+            throw new ArgumentException("Host cannot be null or empty", nameof(host));
 
+        Port = port;
+        Host = host;
+    }
 }
