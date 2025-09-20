@@ -1,4 +1,3 @@
-using System.Net;
 using System.Net.Mail;
 using Microsoft.Extensions.Options;
 using NotificationService.Contracts.Models;
@@ -6,29 +5,30 @@ using NotificationService.EmailService.Models;
 
 namespace NotificationService.EmailService.Services;
 
-public class EmailService : IEmailService
+public class EmailService : IEmailService, IDisposable
 {
     private readonly SmtpSettings _smtpSettings;
+    private readonly ISmtpClient _smtpClient;
 
     public EmailService(SmtpSettings smtpSettings)
     {
         _smtpSettings = smtpSettings;
+        _smtpClient = new SmtpClientWrapper(smtpSettings);
     }
 
     public EmailService(IOptions<SmtpSettings> smtpSettings)
+        : this(smtpSettings.Value)
     {
-        _smtpSettings = smtpSettings.Value;
+    }
+
+    public EmailService(ISmtpClient smtpClient, SmtpSettings smtpSettings)
+    {
+        _smtpSettings = smtpSettings;
+        _smtpClient = smtpClient;
     }
 
     public async Task SendStatusReportAsync(string email, ServerStatusReport report)
     {
-        using var smtpClient = new SmtpClient(_smtpSettings.Host)
-        {
-            Port = _smtpSettings.Port,
-            Credentials = new NetworkCredential(_smtpSettings.Username, _smtpSettings.Password),
-            EnableSsl = _smtpSettings.EnableSsl
-        };
-
         var subject = "📊 Отчет о статусе серверов";
         var body = GenerateEmailBody(report);
 
@@ -42,10 +42,10 @@ public class EmailService : IEmailService
         
         mailMessage.To.Add(email);
 
-        await smtpClient.SendMailAsync(mailMessage);
+        await _smtpClient.SendMailAsync(mailMessage);
     }
 
-    private string GenerateEmailBody(ServerStatusReport report)
+    public string GenerateEmailBody(ServerStatusReport report)
     {
         var statusEmoji = report.DownServers == 0 ? "✅" : "⚠️";
         
@@ -63,5 +63,10 @@ public class EmailService : IEmailService
             <br/>
             <p><em>Это автоматическое сообщение, пожалуйста, не отвечайте на него.</em></p>
         ";
+    }
+
+    public void Dispose()
+    {
+        (_smtpClient as IDisposable)?.Dispose();
     }
 }
