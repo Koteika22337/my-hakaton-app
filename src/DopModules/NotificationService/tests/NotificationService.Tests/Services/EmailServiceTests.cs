@@ -1,5 +1,4 @@
 // NotificationService.Tests/Services/EmailServiceTests.cs
-using Microsoft.Extensions.Options;
 using Moq;
 using NotificationService.Contracts.Models;
 using NotificationService.EmailService.Models;
