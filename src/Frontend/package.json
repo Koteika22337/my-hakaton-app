@@ -1,0 +1,28 @@
+{
+  "name": "hakaton",
+  "version": "1.0.0",
+  "description": "hakaton frontend app",
+  "main": "index.js",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@tailwindcss/postcss": "^4.1.13",
+    "next": "^15.4.5",
+    "prettier": "3.6.2",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "sass": "^1.90.0"
+  },
+  "devDependencies": {
+    "autoprefixer": "^10.4.21",
+    "eslint-config-next": "15.4.5",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^4.1.13"
+  }
+}
